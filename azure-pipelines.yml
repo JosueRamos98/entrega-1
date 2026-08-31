@@ -28,11 +28,12 @@ variables:
   # ============================================================
   # INFRAESTRUCTURA
   # ============================================================
-  # Si existe un Resource Group asignado por la asignatura, reemplazar este valor
-  # por el nombre asignado y conservarlo sin modificaciones.
+  # Debe ser el Resource Group donde vive realmente la VM.
+  # Confirmado con:
+  #   az vm show -g vm-entrega-1_grupo -n vm-entrega-1
   resourceGroupName: 'vm-entrega-1_grupo'
-  virtualNetworkName: 'vnet-brazilsouth-1'
-  subnetName: 'snet-brazilsouth-1'
+  virtualNetworkName: 'vnet-entrega-1'
+  subnetName: 'subnet-entrega1'
   addressPrefix: '10.0.0.0/16'
   subnetPrefix: '10.0.1.0/24'
   securityGroupName: 'nsg-entrega-1'
@@ -578,6 +579,235 @@ steps:
       fi
 
       # -------------------------------------------------------
+      # VM EXISTENTE: REUTILIZAR SU RED REAL
+      # -------------------------------------------------------
+      # La VM puede haber sido creada antes con otro naming (por ejemplo
+      # desde el portal, que genera <vm>_grupo y sus propios recursos).
+      # En ese caso no se crea una red paralela: se adoptan la NIC, el NSG
+      # y la IP pública que la VM ya utiliza, y solo se garantiza que los
+      # puertos 22 y 80 estén abiertos.
+      if az vm show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        >/dev/null 2>&1; then
+
+        echo ""
+        echo "============================================================"
+        echo " VM EXISTENTE DETECTADA: SE REUTILIZA SU RED"
+        echo "============================================================"
+
+        VM_LOCATION=$(az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query location \
+          --output tsv)
+
+        NIC_ID=$(az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query "networkProfile.networkInterfaces[0].id" \
+          --output tsv)
+
+        NIC_NAME="${NIC_ID##*/}"
+
+        echo "VM   : $(vmName)"
+        echo "Región: ${VM_LOCATION}"
+        echo "NIC  : ${NIC_NAME}"
+
+        IPCONFIG_NAME=$(az network nic show \
+          --ids "${NIC_ID}" \
+          --query "ipConfigurations[0].name" \
+          --output tsv)
+
+        # ---------------------------------------------------
+        # NSG EFECTIVO (NIC, o subnet, o se crea uno)
+        # ---------------------------------------------------
+        NSG_ID=$(az network nic show \
+          --ids "${NIC_ID}" \
+          --query "networkSecurityGroup.id" \
+          --output tsv)
+
+        if [ -z "${NSG_ID}" ] || [ "${NSG_ID}" = "None" ]; then
+
+          SUBNET_ID=$(az network nic show \
+            --ids "${NIC_ID}" \
+            --query "ipConfigurations[0].subnet.id" \
+            --output tsv)
+
+          NSG_ID=$(az network vnet subnet show \
+            --ids "${SUBNET_ID}" \
+            --query "networkSecurityGroup.id" \
+            --output tsv)
+        fi
+
+        if [ -z "${NSG_ID}" ] || [ "${NSG_ID}" = "None" ]; then
+
+          echo "La VM no tiene NSG asociado. Creando $(securityGroupName)..."
+
+          az network nsg create \
+            --resource-group "$(resourceGroupName)" \
+            --name "$(securityGroupName)" \
+            --location "${VM_LOCATION}" \
+            --output none
+
+          az network nic update \
+            --ids "${NIC_ID}" \
+            --network-security-group "$(securityGroupName)" \
+            --output none
+
+          NSG_ID=$(az network nsg show \
+            --resource-group "$(resourceGroupName)" \
+            --name "$(securityGroupName)" \
+            --query id \
+            --output tsv)
+        fi
+
+        EFFECTIVE_NSG_NAME="${NSG_ID##*/}"
+        EFFECTIVE_NSG_RG=$(echo "${NSG_ID}" | awk -F'/resourceGroups/' '{print $2}' | awk -F'/' '{print $1}')
+
+        echo "NSG  : ${EFFECTIVE_NSG_NAME} (RG: ${EFFECTIVE_NSG_RG})"
+
+        # ---------------------------------------------------
+        # REGLAS 22 Y 80 SOBRE EL NSG EFECTIVO
+        # ---------------------------------------------------
+        # No se asume el naming del taller: si ya existe cualquier regla
+        # inbound que permita el puerto, se respeta. Si hay que crearla,
+        # se busca una prioridad libre para evitar SecurityRuleConflict.
+        ensure_nsg_port() {
+          local RULE_NAME="$1"
+          local BASE_PRIORITY="$2"
+          local PORT="$3"
+
+          local EXISTING_RULE
+          EXISTING_RULE=$(az network nsg rule list \
+            --resource-group "${EFFECTIVE_NSG_RG}" \
+            --nsg-name "${EFFECTIVE_NSG_NAME}" \
+            --query "[?direction=='Inbound' && access=='Allow' && (destinationPortRange=='${PORT}' || destinationPortRange=='*')] | [0].name" \
+            --output tsv)
+
+          if [ -n "${EXISTING_RULE}" ] && [ "${EXISTING_RULE}" != "None" ]; then
+            echo "OK: El puerto ${PORT} ya está permitido por la regla ${EXISTING_RULE}."
+            return 0
+          fi
+
+          local USED_PRIORITIES
+          USED_PRIORITIES=$(az network nsg rule list \
+            --resource-group "${EFFECTIVE_NSG_RG}" \
+            --nsg-name "${EFFECTIVE_NSG_NAME}" \
+            --query "[].priority" \
+            --output tsv)
+
+          local PRIORITY="${BASE_PRIORITY}"
+
+          while echo "${USED_PRIORITIES}" | grep -qx "${PRIORITY}"; do
+            PRIORITY=$((PRIORITY + 1))
+          done
+
+          echo "Creando regla ${RULE_NAME} (puerto ${PORT}, prioridad ${PRIORITY})..."
+
+          az network nsg rule create \
+            --resource-group "${EFFECTIVE_NSG_RG}" \
+            --nsg-name "${EFFECTIVE_NSG_NAME}" \
+            --name "${RULE_NAME}" \
+            --protocol Tcp \
+            --direction Inbound \
+            --priority "${PRIORITY}" \
+            --source-address-prefixes "*" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges "${PORT}" \
+            --access Allow \
+            --output none
+
+          echo "OK: Regla ${RULE_NAME} creada."
+        }
+
+        echo ""
+        echo "Validando puertos en ${EFFECTIVE_NSG_NAME}..."
+
+        ensure_nsg_port "allow-ssh-22" 1000 22
+        ensure_nsg_port "allow-http-80" 1001 80
+
+        # ---------------------------------------------------
+        # IP PÚBLICA EFECTIVA
+        # ---------------------------------------------------
+        PIP_ID=$(az network nic show \
+          --ids "${NIC_ID}" \
+          --query "ipConfigurations[0].publicIpAddress.id" \
+          --output tsv)
+
+        if [ -z "${PIP_ID}" ] || [ "${PIP_ID}" = "None" ]; then
+
+          echo ""
+          echo "La NIC no tiene IP pública. Creando $(publicIpName)..."
+
+          az network public-ip create \
+            --resource-group "$(resourceGroupName)" \
+            --name "$(publicIpName)" \
+            --location "${VM_LOCATION}" \
+            --sku Standard \
+            --allocation-method Static \
+            --output none
+
+          az network nic ip-config update \
+            --resource-group "$(resourceGroupName)" \
+            --nic-name "${NIC_NAME}" \
+            --name "${IPCONFIG_NAME}" \
+            --public-ip-address "$(publicIpName)" \
+            --output none
+
+          PIP_ID=$(az network public-ip show \
+            --resource-group "$(resourceGroupName)" \
+            --name "$(publicIpName)" \
+            --query id \
+            --output tsv)
+        fi
+
+        echo "IP pública: ${PIP_ID##*/}"
+
+        # ---------------------------------------------------
+        # ESTADO DE ENERGÍA
+        # ---------------------------------------------------
+        POWER_STATE=$(az vm get-instance-view \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [0]" \
+          --output tsv)
+
+        echo ""
+        echo "Estado de energía detectado: ${POWER_STATE}"
+
+        if [ "${POWER_STATE}" != "VM running" ]; then
+
+          echo "La VM no está ejecutándose. Iniciando..."
+
+          az vm start \
+            --resource-group "$(resourceGroupName)" \
+            --name "$(vmName)" \
+            --output none
+
+          echo "OK: VM iniciada."
+        fi
+
+        echo ""
+        echo "============================================================"
+        echo " ESTADO ACTUAL DE LA VM"
+        echo "============================================================"
+
+        az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --show-details \
+          --query "{VM:name,Region:location,Estado:powerState,Provisioning:provisioningState,IP_Publica:publicIps}" \
+          --output table
+
+        echo ""
+        echo "Infraestructura existente reutilizada. No se crean recursos nuevos."
+
+        exit 0
+      fi
+
+      # -------------------------------------------------------
       # VIRTUAL NETWORK
       # -------------------------------------------------------
       echo ""
@@ -798,32 +1028,6 @@ steps:
       echo " VALIDANDO INTERFAZ DE RED"
       echo "============================================================"
       echo "NIC esperada: $(networkInterfaceName)"
-
-      # Si la VM ya existe con este naming, validamos primero que utilice
-      # la NIC esperada. Esto evita crear una NIC adicional no utilizada.
-      if az vm show \
-        --resource-group "$(resourceGroupName)" \
-        --name "$(vmName)" \
-        >/dev/null 2>&1; then
-
-        EXISTING_VM_NIC_ID=$(az vm show \
-          --resource-group "$(resourceGroupName)" \
-          --name "$(vmName)" \
-          --query "networkProfile.networkInterfaces[0].id" \
-          --output tsv)
-
-        EXISTING_VM_NIC_NAME=$(basename "${EXISTING_VM_NIC_ID}")
-
-        echo "VM existente detectada con NIC: ${EXISTING_VM_NIC_NAME}"
-
-        if [ "${EXISTING_VM_NIC_NAME}" != "$(networkInterfaceName)" ]; then
-          echo "ERROR: La VM existente no utiliza la NIC definida para el taller."
-          echo "Esperada: $(networkInterfaceName)"
-          echo "Actual  : ${EXISTING_VM_NIC_NAME}"
-          echo "Revisa o limpia la infraestructura anterior antes de continuar."
-          exit 1
-        fi
-      fi
 
       echo ""
       echo "[8/9] Validando Network Interface..."
@@ -1249,10 +1453,13 @@ steps:
       echo " VALIDACIÓN END-TO-END"
       echo "============================================================"
 
-      PUBLIC_IP=$(az network public-ip show \
+      # Se obtiene desde la VM y no por nombre de recurso, para que funcione
+      # tanto con la red del taller como con la red que la VM ya tenía.
+      PUBLIC_IP=$(az vm show \
         --resource-group "$(resourceGroupName)" \
-        --name "$(publicIpName)" \
-        --query ipAddress \
+        --name "$(vmName)" \
+        --show-details \
+        --query publicIps \
         --output tsv)
 
       if [ -z "${PUBLIC_IP}" ]; then
@@ -1342,4 +1549,3 @@ steps:
       echo "HTTP: OK"
       echo "Contenido desplegado: OK"
       echo "URL: http://${PUBLIC_IP}"
-      
