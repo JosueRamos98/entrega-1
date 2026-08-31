@@ -1342,3 +1342,4 @@ steps:
       echo "HTTP: OK"
       echo "Contenido desplegado: OK"
       echo "URL: http://${PUBLIC_IP}"
+      
