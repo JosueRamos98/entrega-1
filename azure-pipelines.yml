@@ -31,13 +31,13 @@ variables:
   # Si existe un Resource Group asignado por la asignatura, reemplazar este valor
   # por el nombre asignado y conservarlo sin modificaciones.
   resourceGroupName: 'rg-entrega-1'
-  virtualNetworkName: 'vnet-entrega1'
+  virtualNetworkName: 'vnet-entrega-1'
   subnetName: 'subnet-entrega1'
   addressPrefix: '10.0.0.0/16'
   subnetPrefix: '10.0.1.0/24'
   securityGroupName: 'nsg-entrega-1'
   publicIpName: 'pip-entrega1'
-  networkInterfaceName: 'nic-entrega1'
+  networkInterfaceName: 'nic-entrega-1'
   vmName: 'vm-entrega-1'
   vmSize: 'Standard_D2ads_v6'
   adminUsername: 'azureuser'
