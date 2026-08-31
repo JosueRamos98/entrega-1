@@ -31,8 +31,8 @@ variables:
   # Si existe un Resource Group asignado por la asignatura, reemplazar este valor
   # por el nombre asignado y conservarlo sin modificaciones.
   resourceGroupName: 'rg-entrega-1'
-  virtualNetworkName: 'vnet-entrega-1'
-  subnetName: 'subnet-entrega1'
+  virtualNetworkName: 'vnet-brazilsouth-1'
+  subnetName: 'snet-brazilsouth-1'
   addressPrefix: '10.0.0.0/16'
   subnetPrefix: '10.0.1.0/24'
   securityGroupName: 'nsg-entrega-1'
