@@ -68,7 +68,6 @@ variables:
   # Debe ir en una sola línea y sin comillas simples internas.
   indexContent: '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Entrega 1 - DevOps</title><style>*{box-sizing:border-box;margin:0}body{min-height:100vh;display:grid;place-items:center;padding:24px;font-family:"Segoe UI",Roboto,Arial,sans-serif;background:linear-gradient(135deg,#1e3a8a,#0f172a 55%,#082f49);color:#e6ebf5}.card{width:100%;max-width:440px;text-align:center;padding:44px 36px;border:1px solid rgba(148,197,253,.25);border-radius:20px;background:rgba(15,23,42,.72);box-shadow:0 20px 50px rgba(0,0,0,.45)}.check{width:62px;height:62px;margin:0 auto 22px;display:grid;place-items:center;font-size:1.8rem;border-radius:50%;color:#052e1a;background:#34d399;box-shadow:0 0 0 8px rgba(52,211,153,.16)}h1{font-size:1.75rem}p{margin-top:12px;color:#a3b1cc;line-height:1.6}.tag{display:inline-block;margin-top:26px;padding:8px 18px;border-radius:999px;font-size:.82rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#7dd3fc;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.4)}</style></head><body><main class="card"><div class="check">&#10003;</div><h1>Entrega 1 desplegada</h1><p>Apache en Azure publico esta pagina automaticamente desde un pipeline de Azure DevOps.</p><span class="tag">Version 1</span></main></body></html>'
 
-
 steps:
 
 # ============================================================
