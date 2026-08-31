@@ -1,0 +1,1308 @@
+# ============================================================
+# TALLER DE REFORZAMIENTO 1 - DEVOPS (ISY2201)
+# NAMING ESTANDARIZADO
+# ============================================================
+# Naming simplificado para uso docente en el Taller de Reforzamiento 1.
+# Si el curso ya dispone de un Resource Group asignado, usar EXACTAMENTE
+# el nombre asignado en resourceGroupName y no crear uno adicional.
+#
+# Repositorio sugerido : reforzamiento1-iac
+# Pipeline en Azure DevOps: pipeline-reforzamiento1
+# Archivo YAML          : azure-pipelines.yml
+# ============================================================
+
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # ============================================================
+  # AZURE DEVOPS / SERVICE CONNECTION
+  # ============================================================
+  # Debe coincidir EXACTAMENTE con el nombre de la Service Connection creada en Azure DevOps.
+  azureSubscription: 'sc-reforzamiento1'
+
+  # ============================================================
+  # REGIONES CANDIDATAS
+  # ============================================================
+  # El pipeline probará estas regiones en orden y seleccionará
+  # automáticamente la primera que:
+  #   1) exista en Azure,
+  #   2) sea aceptada por Azure Policy para recursos de red,
+  #   3) tenga disponible el SKU definido en vmSize.
+  #
+  # Para Azure for Students se evita East US 2 en esta lista,
+  # ya que la evidencia actual mostró RequestDisallowedByAzure.
+  locationCandidates: 'northcentralus eastus brazilsouth'
+
+  # ============================================================
+  # INFRAESTRUCTURA
+  # ============================================================
+  # Si existe un Resource Group asignado por la asignatura, reemplazar este valor
+  # por el nombre asignado y conservarlo sin modificaciones.
+  resourceGroupName: 'rg-reforzamiento1'
+  virtualNetworkName: 'vnet-reforzamiento1'
+  subnetName: 'subnet-reforzamiento1'
+  addressPrefix: '10.0.0.0/16'
+  subnetPrefix: '10.0.1.0/24'
+  securityGroupName: 'nsg-reforzamiento1'
+  publicIpName: 'pip-reforzamiento1'
+  networkInterfaceName: 'nic-reforzamiento1'
+  vmName: 'vm-reforzamiento1'
+  vmSize: 'Standard_B2ats_v2'
+  adminUsername: 'azureuser'
+
+  # IMPORTANTE:
+  # Crear "vmAdminPassword" como variable SECRET en Azure DevOps:
+  #
+  # Pipelines > Edit > Variables
+  # vmAdminPassword = ********
+  # Keep this value secret = habilitado
+  #
+  # Nunca almacenar la contraseña directamente en este YAML.
+
+  # ============================================================
+  # IMAGEN DE UBUNTU
+  # ============================================================
+  imagePublisher: 'Canonical'
+  imageOffer: 'ubuntu-24_04-lts'
+  imageSku: 'server'
+  imageVersion: 'latest'
+
+  # ============================================================
+  # CONTENIDO DE LA APLICACIÓN
+  # ============================================================
+  # Modifica este valor y realiza commit/push a main para
+  # demostrar un nuevo despliegue.
+  indexContent: 'Taller de Reforzamiento 1 - DevOps ISY2201 - despliegue automatizado desde Azure DevOps'
+
+
+steps:
+
+# ============================================================
+# PASO 0
+# VALIDAR VARIABLES Y SECRETOS
+# ============================================================
+
+- task: Bash@3
+  displayName: '0. Validar variables y secretos'
+  env:
+    VM_ADMIN_PASSWORD: $(vmAdminPassword)
+  inputs:
+    targetType: 'inline'
+    script: |
+      set -euo pipefail
+
+      echo "============================================================"
+      echo " VALIDACIÓN DE VARIABLES Y SECRETOS"
+      echo "============================================================"
+
+      ERROR_FOUND=false
+
+      validate_variable() {
+        local NAME="$1"
+        local VALUE="$2"
+
+        if [ -z "${VALUE}" ] || [[ "${VALUE}" == '$('* ]]; then
+          echo "ERROR: La variable ${NAME} no está definida."
+          ERROR_FOUND=true
+        else
+          echo "OK: Variable ${NAME} cargada."
+        fi
+      }
+
+      validate_secret() {
+        local NAME="$1"
+        local VALUE="$2"
+
+        if [ -z "${VALUE}" ] || [[ "${VALUE}" == '$('* ]]; then
+          echo "ERROR: El secreto ${NAME} no está definido."
+          ERROR_FOUND=true
+        else
+          echo "OK: Secreto ${NAME} cargado correctamente."
+          echo "    Valor protegido: ********"
+        fi
+      }
+
+      validate_variable "azureSubscription" "$(azureSubscription)"
+      validate_variable "locationCandidates" "$(locationCandidates)"
+      validate_variable "resourceGroupName" "$(resourceGroupName)"
+      validate_variable "virtualNetworkName" "$(virtualNetworkName)"
+      validate_variable "subnetName" "$(subnetName)"
+      validate_variable "addressPrefix" "$(addressPrefix)"
+      validate_variable "subnetPrefix" "$(subnetPrefix)"
+      validate_variable "securityGroupName" "$(securityGroupName)"
+      validate_variable "publicIpName" "$(publicIpName)"
+      validate_variable "networkInterfaceName" "$(networkInterfaceName)"
+      validate_variable "vmName" "$(vmName)"
+      validate_variable "vmSize" "$(vmSize)"
+      validate_variable "adminUsername" "$(adminUsername)"
+      validate_variable "imagePublisher" "$(imagePublisher)"
+      validate_variable "imageOffer" "$(imageOffer)"
+      validate_variable "imageSku" "$(imageSku)"
+      validate_variable "imageVersion" "$(imageVersion)"
+      validate_variable "indexContent" "$(indexContent)"
+
+      validate_secret "vmAdminPassword" "${VM_ADMIN_PASSWORD:-}"
+
+      if [ "${ERROR_FOUND}" = "true" ]; then
+        echo ""
+        echo "============================================================"
+        echo " VALIDACIÓN FALLIDA"
+        echo "============================================================"
+        echo "El pipeline se detendrá antes de modificar Azure."
+        exit 1
+      fi
+
+      echo ""
+      echo "============================================================"
+      echo " VALIDACIÓN CORRECTA"
+      echo "============================================================"
+      echo "Variables obligatorias: OK"
+      echo "Secreto vmAdminPassword: OK"
+
+
+# ============================================================
+# PASO 1
+# PREFLIGHT DE SUSCRIPCIÓN, POLICY, REGIÓN Y SKU
+# ============================================================
+
+- task: AzureCLI@2
+  displayName: '1. Preflight Azure Policy, región y SKU'
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -euo pipefail
+
+      echo "============================================================"
+      echo " PREFLIGHT DE AZURE"
+      echo "============================================================"
+
+      SUBSCRIPTION_ID=$(az account show --query id --output tsv)
+      SUBSCRIPTION_NAME=$(az account show --query name --output tsv)
+      TENANT_ID=$(az account show --query tenantId --output tsv)
+
+      echo "Suscripción : ${SUBSCRIPTION_NAME}"
+      echo "ID          : ${SUBSCRIPTION_ID}"
+      echo "Tenant      : ${TENANT_ID}"
+      echo "VM SKU      : $(vmSize)"
+      echo "Candidatas  : $(locationCandidates)"
+
+      # -------------------------------------------------------
+      # REGISTRAR PROVIDERS NECESARIOS
+      # -------------------------------------------------------
+      echo ""
+      echo "============================================================"
+      echo " VALIDANDO RESOURCE PROVIDERS"
+      echo "============================================================"
+
+      for PROVIDER in Microsoft.Network Microsoft.Compute; do
+
+        STATE=$(az provider show \
+          --namespace "${PROVIDER}" \
+          --query registrationState \
+          --output tsv 2>/dev/null || echo "Unknown")
+
+        echo "${PROVIDER}: ${STATE}"
+
+        if [ "${STATE}" != "Registered" ]; then
+          echo "Registrando ${PROVIDER}..."
+
+          az provider register \
+            --namespace "${PROVIDER}" \
+            --wait \
+            --output none
+
+          echo "OK: ${PROVIDER} registrado."
+        fi
+      done
+
+      # -------------------------------------------------------
+      # RESOURCE GROUP
+      # -------------------------------------------------------
+      # az deployment group validate requiere un Resource Group.
+      # Si no existe, se intenta crear usando las regiones candidatas.
+      echo ""
+      echo "============================================================"
+      echo " VALIDANDO RESOURCE GROUP"
+      echo "============================================================"
+
+      if [ "$(az group exists --name "$(resourceGroupName)")" = "true" ]; then
+
+        RG_LOCATION=$(az group show \
+          --name "$(resourceGroupName)" \
+          --query location \
+          --output tsv)
+
+        echo "OK: Resource Group $(resourceGroupName) ya existe."
+        echo "Ubicación de metadatos del RG: ${RG_LOCATION}"
+        echo "Nota: los recursos hijos pueden usar otra región explícita."
+
+      else
+
+        echo "Resource Group no existe."
+        echo "Intentando crearlo..."
+
+        RG_CREATED=false
+
+        for REGION in $(locationCandidates); do
+
+          echo "Intentando Resource Group en ${REGION}..."
+
+          if az group create \
+            --name "$(resourceGroupName)" \
+            --location "${REGION}" \
+            --output none 2>/tmp/rg-create-error.log; then
+
+            echo "OK: Resource Group creado en ${REGION}."
+            RG_CREATED=true
+            break
+
+          else
+            echo "No fue posible crear el RG en ${REGION}."
+            tail -n 5 /tmp/rg-create-error.log || true
+          fi
+
+        done
+
+        rm -f /tmp/rg-create-error.log
+
+        if [ "${RG_CREATED}" != "true" ]; then
+          echo ""
+          echo "ERROR: No fue posible crear $(resourceGroupName)."
+          exit 1
+        fi
+      fi
+
+      # -------------------------------------------------------
+      # MOSTRAR POLICY ASSIGNMENTS COMO DIAGNÓSTICO
+      # -------------------------------------------------------
+      echo ""
+      echo "============================================================"
+      echo " POLICY ASSIGNMENTS VISIBLES"
+      echo "============================================================"
+
+      az policy assignment list \
+        --scope "/subscriptions/${SUBSCRIPTION_ID}" \
+        --disable-scope-strict-match \
+        --query "[].{Policy:displayName,Scope:scope}" \
+        --output table || true
+
+      # -------------------------------------------------------
+      # SI LA VM YA EXISTE, CONSERVAR SU REGIÓN
+      # -------------------------------------------------------
+      if az vm show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        >/dev/null 2>&1; then
+
+        EXISTING_VM_LOCATION=$(az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query location \
+          --output tsv)
+
+        echo ""
+        echo "============================================================"
+        echo " VM EXISTENTE DETECTADA"
+        echo "============================================================"
+        echo "VM: $(vmName)"
+        echo "Región existente: ${EXISTING_VM_LOCATION}"
+        echo "Se reutilizará esa región."
+
+        echo "##vso[task.setvariable variable=selectedLocation]${EXISTING_VM_LOCATION}"
+
+        exit 0
+      fi
+
+      # -------------------------------------------------------
+      # TEMPLATE DE PREFLIGHT
+      # -------------------------------------------------------
+      # No crea recursos. Azure Resource Manager realiza una validación
+      # Provider-level, por lo que Azure Policy participa antes del deploy.
+      TEMPLATE_FILE="$(Agent.TempDirectory)/region-policy-validation.json"
+
+      cat > "${TEMPLATE_FILE}" <<'ARM_TEMPLATE'
+      {
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {
+          "location": {
+            "type": "string"
+          }
+        },
+        "resources": [
+          {
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2024-05-01",
+            "name": "vnet-ref1-check",
+            "location": "[parameters('location')]",
+            "properties": {
+              "addressSpace": {
+                "addressPrefixes": [
+                  "10.254.0.0/16"
+                ]
+              }
+            }
+          },
+          {
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "apiVersion": "2024-05-01",
+            "name": "nsg-ref1-check",
+            "location": "[parameters('location')]",
+            "properties": {}
+          },
+          {
+            "type": "Microsoft.Network/publicIPAddresses",
+            "apiVersion": "2024-05-01",
+            "name": "pip-ref1-check",
+            "location": "[parameters('location')]",
+            "sku": {
+              "name": "Standard"
+            },
+            "properties": {
+              "publicIPAllocationMethod": "Static"
+            }
+          }
+        ]
+      }
+      ARM_TEMPLATE
+
+      # -------------------------------------------------------
+      # SI YA EXISTE VNET, SU REGIÓN DEBE MANTENERSE
+      # -------------------------------------------------------
+      EXISTING_VNET_LOCATION=""
+
+      if az network vnet show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(virtualNetworkName)" \
+        >/dev/null 2>&1; then
+
+        EXISTING_VNET_LOCATION=$(az network vnet show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(virtualNetworkName)" \
+          --query location \
+          --output tsv)
+
+        echo ""
+        echo "VNet existente detectada en: ${EXISTING_VNET_LOCATION}"
+        echo "La VM debe desplegarse en la misma región que la VNet."
+      fi
+
+      # -------------------------------------------------------
+      # CONSTRUIR LISTA DE CANDIDATAS SIN DUPLICADOS
+      # -------------------------------------------------------
+      CANDIDATES=""
+
+      if [ -n "${EXISTING_VNET_LOCATION}" ]; then
+        CANDIDATES="${EXISTING_VNET_LOCATION}"
+      else
+        CANDIDATES="$(locationCandidates)"
+      fi
+
+      SELECTED_LOCATION=""
+
+      echo ""
+      echo "============================================================"
+      echo " VALIDANDO REGIONES CANDIDATAS"
+      echo "============================================================"
+
+      for REGION in ${CANDIDATES}; do
+
+        echo ""
+        echo "------------------------------------------------------------"
+        echo "Probando región: ${REGION}"
+        echo "------------------------------------------------------------"
+
+        # -----------------------------------------------------
+        # 1. VALIDAR QUE LA REGIÓN EXISTA
+        # -----------------------------------------------------
+        REGION_EXISTS=$(az account list-locations \
+          --query "[?name=='${REGION}'].name | [0]" \
+          --output tsv)
+
+        if [ "${REGION_EXISTS}" != "${REGION}" ]; then
+          echo "DESCARTADA: Azure no reconoce la región ${REGION}."
+          continue
+        fi
+
+        echo "OK: Región reconocida por Azure."
+
+        # -----------------------------------------------------
+        # 2. VALIDAR POLICY SIN CREAR RECURSOS
+        # -----------------------------------------------------
+        echo "Validando Azure Policy mediante ARM Provider validation..."
+
+        if POLICY_RESULT=$(az deployment group validate \
+          --resource-group "$(resourceGroupName)" \
+          --template-file "${TEMPLATE_FILE}" \
+          --parameters location="${REGION}" \
+          --validation-level Provider \
+          --only-show-errors \
+          --output none 2>&1); then
+
+          echo "OK: La validación de Policy permite recursos de red en ${REGION}."
+
+        else
+
+          echo "DESCARTADA: Azure Policy rechazó ${REGION}."
+          echo "${POLICY_RESULT}" | tail -n 10
+          continue
+        fi
+
+        # -----------------------------------------------------
+        # 3. VALIDAR SKU DE VM PARA ESTA SUSCRIPCIÓN
+        # -----------------------------------------------------
+        echo "Validando disponibilidad del SKU $(vmSize)..."
+
+        if SKU_NAME=$(az vm list-skus \
+          --location "${REGION}" \
+          --resource-type virtualMachines \
+          --size "$(vmSize)" \
+          --query "[?name=='$(vmSize)'].name | [0]" \
+          --output tsv 2>/dev/null); then
+
+          true
+
+        else
+          SKU_NAME=""
+        fi
+
+        # az vm list-skus sin --all muestra los SKU disponibles
+        # considerando restricciones de la suscripción.
+        if [ "${SKU_NAME}" != "$(vmSize)" ]; then
+          echo "DESCARTADA: $(vmSize) no está disponible para esta suscripción en ${REGION}."
+          continue
+        fi
+
+        echo "OK: SKU $(vmSize) disponible."
+
+        # -----------------------------------------------------
+        # REGIÓN SELECCIONADA
+        # -----------------------------------------------------
+        SELECTED_LOCATION="${REGION}"
+
+        echo ""
+        echo "============================================================"
+        echo " REGIÓN COMPATIBLE ENCONTRADA"
+        echo "============================================================"
+        echo "Región seleccionada: ${SELECTED_LOCATION}"
+        echo "Policy: OK"
+        echo "VM SKU: OK"
+
+        break
+      done
+
+      rm -f "${TEMPLATE_FILE}"
+
+      if [ -z "${SELECTED_LOCATION}" ]; then
+        echo ""
+        echo "============================================================"
+        echo " ERROR DE PREFLIGHT"
+        echo "============================================================"
+
+        if [ -n "${EXISTING_VNET_LOCATION}" ]; then
+          echo "La VNet existente está en ${EXISTING_VNET_LOCATION},"
+          echo "pero esa región no superó Policy/SKU."
+          echo ""
+          echo "Acciones posibles:"
+          echo "1. Utilizar un vmSize permitido en esa región."
+          echo "2. Eliminar la infraestructura parcial y volver a ejecutar."
+        else
+          echo "Ninguna región candidata superó Policy + disponibilidad de SKU."
+          echo "Candidatas evaluadas: $(locationCandidates)"
+          echo ""
+          echo "Revisa Azure Policy o agrega una región permitida a locationCandidates."
+        fi
+
+        exit 1
+      fi
+
+      # Variable disponible para los tasks siguientes.
+      echo "##vso[task.setvariable variable=selectedLocation]${SELECTED_LOCATION}"
+
+      echo ""
+      echo "============================================================"
+      echo " PREFLIGHT FINALIZADO"
+      echo "============================================================"
+      echo "selectedLocation=${SELECTED_LOCATION}"
+
+
+# ============================================================
+# PASO 2
+# DESPLEGAR O REUTILIZAR INFRAESTRUCTURA
+# ============================================================
+
+- task: AzureCLI@2
+  displayName: '2. Desplegar y validar infraestructura'
+  env:
+    VM_ADMIN_PASSWORD: $(vmAdminPassword)
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -euo pipefail
+
+      SELECTED_LOCATION="$(selectedLocation)"
+
+      if [ -z "${SELECTED_LOCATION}" ] || [[ "${SELECTED_LOCATION}" == '$('* ]]; then
+        echo "ERROR: selectedLocation no fue definida por el preflight."
+        exit 1
+      fi
+
+      echo "============================================================"
+      echo " VALIDACIÓN Y DESPLIEGUE DE INFRAESTRUCTURA"
+      echo "============================================================"
+      echo "Región seleccionada: ${SELECTED_LOCATION}"
+
+      # -------------------------------------------------------
+      # RESOURCE GROUP
+      # -------------------------------------------------------
+      echo ""
+      echo "[1/9] Validando Resource Group..."
+
+      if [ "$(az group exists --name "$(resourceGroupName)")" = "true" ]; then
+
+        RG_LOCATION=$(az group show \
+          --name "$(resourceGroupName)" \
+          --query location \
+          --output tsv)
+
+        echo "OK: Resource Group $(resourceGroupName) ya existe."
+        echo "Ubicación del RG: ${RG_LOCATION}"
+        echo "Los recursos se crearán explícitamente en ${SELECTED_LOCATION}."
+
+      else
+        # Este escenario normalmente ya fue resuelto en el preflight.
+        echo "Resource Group no existe. Creando..."
+
+        az group create \
+          --name "$(resourceGroupName)" \
+          --location "${SELECTED_LOCATION}" \
+          --output none
+
+        echo "OK: Resource Group creado."
+      fi
+
+      # -------------------------------------------------------
+      # VIRTUAL NETWORK
+      # -------------------------------------------------------
+      echo ""
+      echo "[2/9] Validando Virtual Network..."
+
+      if az network vnet show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(virtualNetworkName)" \
+        >/dev/null 2>&1; then
+
+        VNET_LOCATION=$(az network vnet show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(virtualNetworkName)" \
+          --query location \
+          --output tsv)
+
+        echo "OK: VNet $(virtualNetworkName) ya existe en ${VNET_LOCATION}."
+
+        if [ "${VNET_LOCATION}" != "${SELECTED_LOCATION}" ]; then
+          echo "ERROR: La VNet existe en ${VNET_LOCATION},"
+          echo "pero selectedLocation es ${SELECTED_LOCATION}."
+          echo "La VM y la VNet deben permanecer en la misma región."
+          exit 1
+        fi
+
+      else
+        echo "VNet no existe. Creando explícitamente en ${SELECTED_LOCATION}..."
+
+        # IMPORTANTE:
+        # Se define --location explícitamente.
+        # Si se omite, Azure puede usar la ubicación del Resource Group.
+        az network vnet create \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(virtualNetworkName)" \
+          --location "${SELECTED_LOCATION}" \
+          --address-prefixes "$(addressPrefix)" \
+          --subnet-name "$(subnetName)" \
+          --subnet-prefixes "$(subnetPrefix)" \
+          --output none
+
+        echo "OK: VNet creada en ${SELECTED_LOCATION}."
+      fi
+
+      # -------------------------------------------------------
+      # SUBNET
+      # -------------------------------------------------------
+      echo ""
+      echo "[3/9] Validando Subnet..."
+
+      if az network vnet subnet show \
+        --resource-group "$(resourceGroupName)" \
+        --vnet-name "$(virtualNetworkName)" \
+        --name "$(subnetName)" \
+        >/dev/null 2>&1; then
+
+        echo "OK: Subnet $(subnetName) ya existe."
+
+      else
+        echo "Subnet no existe. Creando..."
+
+        az network vnet subnet create \
+          --resource-group "$(resourceGroupName)" \
+          --vnet-name "$(virtualNetworkName)" \
+          --name "$(subnetName)" \
+          --address-prefixes "$(subnetPrefix)" \
+          --output none
+
+        echo "OK: Subnet creada."
+      fi
+
+      # -------------------------------------------------------
+      # NETWORK SECURITY GROUP
+      # -------------------------------------------------------
+      echo ""
+      echo "[4/9] Validando Network Security Group..."
+
+      if az network nsg show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(securityGroupName)" \
+        >/dev/null 2>&1; then
+
+        NSG_LOCATION=$(az network nsg show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(securityGroupName)" \
+          --query location \
+          --output tsv)
+
+        echo "OK: NSG $(securityGroupName) ya existe en ${NSG_LOCATION}."
+
+        if [ "${NSG_LOCATION}" != "${SELECTED_LOCATION}" ]; then
+          echo "ERROR: El NSG existe en otra región."
+          exit 1
+        fi
+
+      else
+        echo "NSG no existe. Creando..."
+
+        az network nsg create \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(securityGroupName)" \
+          --location "${SELECTED_LOCATION}" \
+          --output none
+
+        echo "OK: NSG creado."
+      fi
+
+      # -------------------------------------------------------
+      # REGLA SSH
+      # -------------------------------------------------------
+      echo ""
+      echo "[5/9] Validando regla allow-ssh-22..."
+
+      if az network nsg rule show \
+        --resource-group "$(resourceGroupName)" \
+        --nsg-name "$(securityGroupName)" \
+        --name "allow-ssh-22" \
+        >/dev/null 2>&1; then
+
+        echo "OK: Regla allow-ssh-22 ya existe."
+
+      else
+        echo "Creando regla allow-ssh-22..."
+
+        az network nsg rule create \
+          --resource-group "$(resourceGroupName)" \
+          --nsg-name "$(securityGroupName)" \
+          --name "allow-ssh-22" \
+          --protocol Tcp \
+          --direction Inbound \
+          --priority 1000 \
+          --source-address-prefixes "*" \
+          --source-port-ranges "*" \
+          --destination-address-prefixes "*" \
+          --destination-port-ranges 22 \
+          --access Allow \
+          --output none
+
+        echo "OK: Regla allow-ssh-22 creada."
+      fi
+
+      # -------------------------------------------------------
+      # REGLA HTTP
+      # -------------------------------------------------------
+      echo ""
+      echo "[6/9] Validando regla allow-http-80..."
+
+      if az network nsg rule show \
+        --resource-group "$(resourceGroupName)" \
+        --nsg-name "$(securityGroupName)" \
+        --name "allow-http-80" \
+        >/dev/null 2>&1; then
+
+        echo "OK: Regla allow-http-80 ya existe."
+
+      else
+        echo "Creando regla allow-http-80..."
+
+        az network nsg rule create \
+          --resource-group "$(resourceGroupName)" \
+          --nsg-name "$(securityGroupName)" \
+          --name "allow-http-80" \
+          --protocol Tcp \
+          --direction Inbound \
+          --priority 1001 \
+          --source-address-prefixes "*" \
+          --source-port-ranges "*" \
+          --destination-address-prefixes "*" \
+          --destination-port-ranges 80 \
+          --access Allow \
+          --output none
+
+        echo "OK: Regla allow-http-80 creada."
+      fi
+
+      # -------------------------------------------------------
+      # IP PÚBLICA
+      # -------------------------------------------------------
+      echo ""
+      echo "[7/9] Validando IP pública..."
+
+      if az network public-ip show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(publicIpName)" \
+        >/dev/null 2>&1; then
+
+        PIP_LOCATION=$(az network public-ip show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(publicIpName)" \
+          --query location \
+          --output tsv)
+
+        echo "OK: IP pública $(publicIpName) ya existe en ${PIP_LOCATION}."
+
+        if [ "${PIP_LOCATION}" != "${SELECTED_LOCATION}" ]; then
+          echo "ERROR: La IP pública existe en otra región."
+          exit 1
+        fi
+
+      else
+        echo "IP pública no existe. Creando..."
+
+        az network public-ip create \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(publicIpName)" \
+          --location "${SELECTED_LOCATION}" \
+          --sku Standard \
+          --allocation-method Static \
+          --output none
+
+        echo "OK: IP pública creada."
+      fi
+
+      # -------------------------------------------------------
+      # NETWORK INTERFACE (NIC)
+      # -------------------------------------------------------
+      echo ""
+      echo "============================================================"
+      echo " VALIDANDO INTERFAZ DE RED"
+      echo "============================================================"
+      echo "NIC esperada: $(networkInterfaceName)"
+
+      # Si la VM ya existe con este naming, validamos primero que utilice
+      # la NIC esperada. Esto evita crear una NIC adicional no utilizada.
+      if az vm show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        >/dev/null 2>&1; then
+
+        EXISTING_VM_NIC_ID=$(az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query "networkProfile.networkInterfaces[0].id" \
+          --output tsv)
+
+        EXISTING_VM_NIC_NAME=$(basename "${EXISTING_VM_NIC_ID}")
+
+        echo "VM existente detectada con NIC: ${EXISTING_VM_NIC_NAME}"
+
+        if [ "${EXISTING_VM_NIC_NAME}" != "$(networkInterfaceName)" ]; then
+          echo "ERROR: La VM existente no utiliza la NIC definida para el taller."
+          echo "Esperada: $(networkInterfaceName)"
+          echo "Actual  : ${EXISTING_VM_NIC_NAME}"
+          echo "Revisa o limpia la infraestructura anterior antes de continuar."
+          exit 1
+        fi
+      fi
+
+      echo ""
+      echo "[8/9] Validando Network Interface..."
+
+      if az network nic show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(networkInterfaceName)" \
+        >/dev/null 2>&1; then
+
+        NIC_LOCATION=$(az network nic show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(networkInterfaceName)" \
+          --query location \
+          --output tsv)
+
+        echo "OK: NIC $(networkInterfaceName) ya existe en ${NIC_LOCATION}."
+
+        if [ "${NIC_LOCATION}" != "${SELECTED_LOCATION}" ]; then
+          echo "ERROR: La NIC existe en otra región."
+          exit 1
+        fi
+
+      else
+        echo "NIC no existe. Creando..."
+
+        az network nic create \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(networkInterfaceName)" \
+          --location "${SELECTED_LOCATION}" \
+          --vnet-name "$(virtualNetworkName)" \
+          --subnet "$(subnetName)" \
+          --network-security-group "$(securityGroupName)" \
+          --public-ip-address "$(publicIpName)" \
+          --output none
+
+        echo "OK: NIC creada con naming del Taller de Reforzamiento 1."
+      fi
+
+      # -------------------------------------------------------
+      # VM
+      # -------------------------------------------------------
+      echo ""
+      echo "============================================================"
+      echo " VALIDANDO MÁQUINA VIRTUAL"
+      echo "============================================================"
+      echo "[9/9] Validando Máquina Virtual..."
+
+      if az vm show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        >/dev/null 2>&1; then
+
+        VM_LOCATION=$(az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query location \
+          --output tsv)
+
+        VM_CURRENT_SIZE=$(az vm show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --query hardwareProfile.vmSize \
+          --output tsv)
+
+        echo "OK: VM $(vmName) ya existe."
+        echo "Región: ${VM_LOCATION}"
+        echo "SKU actual: ${VM_CURRENT_SIZE}"
+        echo "La infraestructura será reutilizada."
+
+        if [ "${VM_LOCATION}" != "${SELECTED_LOCATION}" ]; then
+          echo "ERROR: La VM existente se encuentra en otra región."
+          exit 1
+        fi
+
+      else
+        echo "VM no existe. Creando en ${SELECTED_LOCATION}..."
+
+        az vm create \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --location "${SELECTED_LOCATION}" \
+          --image "$(imagePublisher):$(imageOffer):$(imageSku):$(imageVersion)" \
+          --size "$(vmSize)" \
+          --admin-username "$(adminUsername)" \
+          --admin-password "${VM_ADMIN_PASSWORD}" \
+          --authentication-type password \
+          --nics "$(networkInterfaceName)" \
+          --output none
+
+        echo "Esperando finalización del aprovisionamiento..."
+
+        az vm wait \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --created
+
+        echo "OK: VM creada."
+      fi
+
+      # -------------------------------------------------------
+      # ESTADO DE LA VM
+      # -------------------------------------------------------
+      POWER_STATE=$(az vm get-instance-view \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        --query "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [0]" \
+        --output tsv)
+
+      echo ""
+      echo "Estado de energía detectado: ${POWER_STATE}"
+
+      if [ "${POWER_STATE}" != "VM running" ]; then
+
+        echo "La VM no está ejecutándose. Iniciando..."
+
+        az vm start \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(vmName)" \
+          --output none
+
+        echo "OK: VM iniciada."
+      fi
+
+      echo ""
+      echo "============================================================"
+      echo " ESTADO ACTUAL DE LA VM"
+      echo "============================================================"
+
+      az vm show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        --show-details \
+        --query "{VM:name,Region:location,Estado:powerState,Provisioning:provisioningState,IP_Publica:publicIps}" \
+        --output table
+
+
+# ============================================================
+# PASO 3
+# INSTALAR / VALIDAR APACHE Y REDESPLEGAR INDEX.HTML
+# ============================================================
+
+- task: AzureCLI@2
+  displayName: '3. Validar Apache y redesplegar index.html'
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -euo pipefail
+
+      echo "============================================================"
+      echo " PREPARANDO DESPLIEGUE DE APACHE"
+      echo "============================================================"
+
+      cat > apache-deploy.sh <<'REMOTE_SCRIPT'
+      #!/usr/bin/env bash
+
+      set -euo pipefail
+
+      INDEX_FILE="/var/www/html/index.html"
+      TEMP_INDEX="/tmp/index-new.html"
+
+      echo "============================================================"
+      echo " ACTUALIZACIÓN DEL SISTEMA"
+      echo "============================================================"
+
+      sudo apt-get update -y
+
+      echo ""
+      echo "============================================================"
+      echo " VALIDACIÓN DE APACHE"
+      echo "============================================================"
+
+      if dpkg -s apache2 >/dev/null 2>&1; then
+
+        echo "OK: Apache ya se encuentra instalado."
+
+      else
+
+        echo "Apache no está instalado."
+        echo "Instalando Apache..."
+
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apache2
+
+        echo "OK: Apache instalado."
+      fi
+
+      if command -v curl >/dev/null 2>&1; then
+
+        echo "OK: curl disponible."
+
+      else
+
+        echo "Instalando curl..."
+
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+      fi
+
+      echo ""
+      echo "============================================================"
+      echo " VERSIÓN DE APACHE"
+      echo "============================================================"
+
+      apache2ctl -v
+
+      echo ""
+      echo "============================================================"
+      echo " ESTADO DE APACHE ANTES DEL DEPLOY"
+      echo "============================================================"
+
+      sudo systemctl enable apache2 >/dev/null
+      sudo systemctl start apache2
+
+      APACHE_STATE_BEFORE=$(sudo systemctl is-active apache2)
+
+      echo "Estado Apache: ${APACHE_STATE_BEFORE}"
+
+      if [ "${APACHE_STATE_BEFORE}" != "active" ]; then
+
+        echo "ERROR: Apache no está activo antes del despliegue."
+
+        sudo systemctl status apache2 --no-pager || true
+
+        exit 1
+      fi
+
+      echo ""
+      echo "============================================================"
+      echo " PREPARANDO NUEVA VERSIÓN DE INDEX.HTML"
+      echo "============================================================"
+
+      cat > "${TEMP_INDEX}" <<'INDEX_CONTENT'
+      $(indexContent)
+      INDEX_CONTENT
+
+      if [ ! -f "${INDEX_FILE}" ]; then
+
+        echo "index.html no existe."
+        echo "Creando nueva versión..."
+
+        sudo install \
+          -m 0644 \
+          "${TEMP_INDEX}" \
+          "${INDEX_FILE}"
+
+        echo "Contenido desplegado."
+        echo "Reiniciando Apache..."
+
+        sudo systemctl restart apache2
+
+        echo "OK: Apache reiniciado."
+
+      elif cmp -s "${TEMP_INDEX}" "${INDEX_FILE}"; then
+
+        echo "------------------------------------------------------------"
+        echo "SIN CAMBIOS DETECTADOS"
+        echo "El contenido de index.html es idéntico al desplegado."
+        echo "Apache NO será reiniciado."
+        echo "------------------------------------------------------------"
+
+      else
+
+        echo "------------------------------------------------------------"
+        echo "CAMBIO DETECTADO EN INDEX.HTML"
+        echo "Se desplegará la nueva versión."
+        echo "------------------------------------------------------------"
+
+        echo ""
+        echo "Contenido anterior:"
+        sudo cat "${INDEX_FILE}"
+
+        echo ""
+        echo "Nuevo contenido:"
+        cat "${TEMP_INDEX}"
+
+        echo ""
+        echo "Actualizando index.html..."
+
+        sudo install \
+          -m 0644 \
+          "${TEMP_INDEX}" \
+          "${INDEX_FILE}"
+
+        echo "Reiniciando Apache para reflejar el cambio..."
+
+        sudo systemctl restart apache2
+
+        echo "OK: Apache reiniciado."
+      fi
+
+      rm -f "${TEMP_INDEX}"
+
+      echo ""
+      echo "============================================================"
+      echo " VALIDACIÓN FINAL DE APACHE"
+      echo "============================================================"
+
+      APACHE_STATE_AFTER=$(sudo systemctl is-active apache2)
+
+      echo "Estado Apache: ${APACHE_STATE_AFTER}"
+
+      if [ "${APACHE_STATE_AFTER}" != "active" ]; then
+
+        echo "ERROR: Apache no quedó activo."
+
+        sudo systemctl status apache2 --no-pager || true
+
+        exit 1
+      fi
+
+      echo ""
+      echo "============================================================"
+      echo " VERSIÓN FINAL DE APACHE"
+      echo "============================================================"
+
+      apache2ctl -v
+
+      echo ""
+      echo "============================================================"
+      echo " CONTENIDO FINAL DE INDEX.HTML"
+      echo "============================================================"
+
+      sudo cat "${INDEX_FILE}"
+
+      echo ""
+      echo "============================================================"
+      echo " VALIDACIÓN HTTP LOCAL"
+      echo "============================================================"
+
+      HTTP_RESPONSE=$(curl \
+        --fail \
+        --silent \
+        --show-error \
+        --max-time 10 \
+        http://localhost)
+
+      echo "Respuesta HTTP local:"
+      echo "${HTTP_RESPONSE}"
+
+      echo ""
+      echo "============================================================"
+      echo " DEPLOY EN LA VM FINALIZADO CORRECTAMENTE"
+      echo "============================================================"
+
+      REMOTE_SCRIPT
+
+      echo "Ejecutando configuración dentro de $(vmName)..."
+
+      az vm run-command invoke \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(vmName)" \
+        --command-id RunShellScript \
+        --scripts @apache-deploy.sh \
+        --query "value[0].message" \
+        --output tsv
+
+      rm -f apache-deploy.sh
+
+
+# ============================================================
+# PASO 4
+# VALIDACIÓN END-TO-END
+# ============================================================
+
+- task: AzureCLI@2
+  displayName: '4. Validar servicio HTTP end-to-end'
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -euo pipefail
+
+      echo "============================================================"
+      echo " VALIDACIÓN END-TO-END"
+      echo "============================================================"
+
+      PUBLIC_IP=$(az network public-ip show \
+        --resource-group "$(resourceGroupName)" \
+        --name "$(publicIpName)" \
+        --query ipAddress \
+        --output tsv)
+
+      if [ -z "${PUBLIC_IP}" ]; then
+        echo "ERROR: No fue posible obtener la IP pública."
+        exit 1
+      fi
+
+      echo "IP pública: ${PUBLIC_IP}"
+      echo "URL: http://${PUBLIC_IP}"
+
+      SUCCESS=false
+      RESPONSE=""
+
+      for ATTEMPT in {1..12}; do
+
+        echo ""
+        echo "Intento HTTP ${ATTEMPT}/12..."
+
+        if RESPONSE=$(curl \
+          --fail \
+          --silent \
+          --show-error \
+          --max-time 10 \
+          "http://${PUBLIC_IP}"); then
+
+          echo ""
+          echo "============================================================"
+          echo " SERVICIO WEB OPERATIVO"
+          echo "============================================================"
+
+          echo "Respuesta recibida:"
+          echo "${RESPONSE}"
+
+          SUCCESS=true
+          break
+        fi
+
+        echo "El servicio todavía no responde."
+        echo "Esperando 5 segundos..."
+
+        sleep 5
+      done
+
+      if [ "${SUCCESS}" != "true" ]; then
+
+        echo ""
+        echo "ERROR: No fue posible validar Apache mediante HTTP."
+
+        exit 1
+      fi
+
+      EXPECTED_CONTENT="$(indexContent)"
+
+      if [ "${RESPONSE}" = "${EXPECTED_CONTENT}" ]; then
+
+        echo ""
+        echo "============================================================"
+        echo " VALIDACIÓN DE CONTENIDO CORRECTA"
+        echo "============================================================"
+
+        echo "La página publicada corresponde a indexContent."
+
+      else
+
+        echo ""
+        echo "ERROR: El contenido publicado no corresponde al esperado."
+
+        echo "Esperado:"
+        echo "${EXPECTED_CONTENT}"
+
+        echo ""
+        echo "Obtenido:"
+        echo "${RESPONSE}"
+
+        exit 1
+      fi
+
+      echo ""
+      echo "============================================================"
+      echo " PIPELINE FINALIZADO CORRECTAMENTE"
+      echo "============================================================"
+
+      echo "Región: $(selectedLocation)"
+      echo "Infraestructura: OK"
+      echo "VM: OK"
+      echo "Apache: active"
+      echo "HTTP: OK"
+      echo "Contenido desplegado: OK"
+      echo "URL: http://${PUBLIC_IP}"
