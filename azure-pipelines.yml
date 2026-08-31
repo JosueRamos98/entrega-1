@@ -1,15 +1,3 @@
-# ============================================================
-# TALLER DE REFORZAMIENTO 1 - DEVOPS (ISY2201)
-# NAMING ESTANDARIZADO
-# ============================================================
-# Naming simplificado para uso docente en el Taller de Reforzamiento 1.
-# Si el curso ya dispone de un Resource Group asignado, usar EXACTAMENTE
-# el nombre asignado en resourceGroupName y no crear uno adicional.
-#
-# Repositorio sugerido : reforzamiento1-iac
-# Pipeline en Azure DevOps: pipeline-reforzamiento1
-# Archivo YAML          : azure-pipelines.yml
-# ============================================================
 
 trigger:
 - main
@@ -22,7 +10,7 @@ variables:
   # AZURE DEVOPS / SERVICE CONNECTION
   # ============================================================
   # Debe coincidir EXACTAMENTE con el nombre de la Service Connection creada en Azure DevOps.
-  azureSubscription: 'sc-reforzamiento1'
+  azureSubscription: 'sc-entrega-1'
 
   # ============================================================
   # REGIONES CANDIDATAS
@@ -42,16 +30,16 @@ variables:
   # ============================================================
   # Si existe un Resource Group asignado por la asignatura, reemplazar este valor
   # por el nombre asignado y conservarlo sin modificaciones.
-  resourceGroupName: 'rg-reforzamiento1'
-  virtualNetworkName: 'vnet-reforzamiento1'
-  subnetName: 'subnet-reforzamiento1'
+  resourceGroupName: 'rg-entrega1'
+  virtualNetworkName: 'vnet-entrega1'
+  subnetName: 'subnet-entrega1'
   addressPrefix: '10.0.0.0/16'
   subnetPrefix: '10.0.1.0/24'
-  securityGroupName: 'nsg-reforzamiento1'
-  publicIpName: 'pip-reforzamiento1'
-  networkInterfaceName: 'nic-reforzamiento1'
-  vmName: 'vm-reforzamiento1'
-  vmSize: 'Standard_B2ats_v2'
+  securityGroupName: 'nsg-entrega1'
+  publicIpName: 'pip-entrega1'
+  networkInterfaceName: 'nic-entrega1'
+  vmName: 'vm-entrega1'
+  vmSize: 'Standard_D2ads_v6'
   adminUsername: 'azureuser'
 
   # IMPORTANTE:
@@ -76,7 +64,7 @@ variables:
   # ============================================================
   # Modifica este valor y realiza commit/push a main para
   # demostrar un nuevo despliegue.
-  indexContent: 'Taller de Reforzamiento 1 - DevOps ISY2201 - despliegue automatizado desde Azure DevOps'
+  indexContent: 'Entrega 1'
 
 
 steps:
