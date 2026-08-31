@@ -65,7 +65,8 @@ variables:
   # ============================================================
   # Modifica este valor y realiza commit/push a main para
   # demostrar un nuevo despliegue.
-  indexContent: '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Entrega 1 - Prueba</title></head><body style="margin:0;font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center"><div style="text-align:center;max-width:640px;padding:32px"><p style="letter-spacing:.2em;text-transform:uppercase;color:#38bdf8;margin:0 0 12px">CI/CD Azure DevOps</p><h1 style="margin:0 0 16px;font-size:2.4rem">Despliegue de prueba OK</h1><p style="color:#94a3b8;margin:0 0 24px">Version 2 - 31 ago 2026. Si ves esta pagina, el pipeline actualizo Apache.</p><p style="display:inline-block;background:#38bdf8;color:#0f172a;font-weight:700;padding:10px 18px;border-radius:999px">index.html actualizado</p></div></body></html>'
+  # Debe ir en una sola línea y sin comillas simples internas.
+  indexContent: '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Entrega 1 - DevOps</title><style>*{box-sizing:border-box;margin:0}body{min-height:100vh;display:grid;place-items:center;padding:24px;font-family:"Segoe UI",Roboto,Arial,sans-serif;background:linear-gradient(135deg,#1e3a8a,#0f172a 55%,#082f49);color:#e6ebf5}.card{width:100%;max-width:440px;text-align:center;padding:44px 36px;border:1px solid rgba(148,197,253,.25);border-radius:20px;background:rgba(15,23,42,.72);box-shadow:0 20px 50px rgba(0,0,0,.45)}.check{width:62px;height:62px;margin:0 auto 22px;display:grid;place-items:center;font-size:1.8rem;border-radius:50%;color:#052e1a;background:#34d399;box-shadow:0 0 0 8px rgba(52,211,153,.16)}h1{font-size:1.75rem}p{margin-top:12px;color:#a3b1cc;line-height:1.6}.tag{display:inline-block;margin-top:26px;padding:8px 18px;border-radius:999px;font-size:.82rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#7dd3fc;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.4)}</style></head><body><main class="card"><div class="check">&#10003;</div><h1>Entrega 1 desplegada</h1><p>Apache en Azure publico esta pagina automaticamente desde un pipeline de Azure DevOps.</p><span class="tag">Version 1</span></main></body></html>'
 
 
 steps:
@@ -220,18 +221,49 @@ steps:
       echo " VALIDANDO RESOURCE GROUP"
       echo "============================================================"
 
-      if [ "$(az group exists --name "$(resourceGroupName)")" = "true" ]; then
+      # No se usa "az group exists": ante un Forbidden devuelve vacío, lo que
+      # se confundiría con "no existe" y llevaría a intentar crearlo.
+      RG_LOOKUP_ERROR="$(Agent.TempDirectory)/rg-lookup-error.log"
 
-        RG_LOCATION=$(az group show \
-          --name "$(resourceGroupName)" \
-          --query location \
-          --output tsv)
+      if RG_LOCATION=$(az group show \
+        --name "$(resourceGroupName)" \
+        --query location \
+        --output tsv 2>"${RG_LOOKUP_ERROR}"); then
+
+        rm -f "${RG_LOOKUP_ERROR}"
 
         echo "OK: Resource Group $(resourceGroupName) ya existe."
         echo "Ubicación de metadatos del RG: ${RG_LOCATION}"
         echo "Nota: los recursos hijos pueden usar otra región explícita."
 
+      elif grep -qiE 'forbidden|authorizationfailed|does not have authorization' "${RG_LOOKUP_ERROR}"; then
+
+        echo ""
+        echo "============================================================"
+        echo " ERROR DE PERMISOS"
+        echo "============================================================"
+        echo "La Service Connection $(azureSubscription) no tiene acceso al"
+        echo "Resource Group $(resourceGroupName)."
+        echo "Azure respondió Forbidden, por lo que no se puede determinar"
+        echo "si el grupo existe ni operar sobre él."
+        echo ""
+        echo "Detalle devuelto por Azure:"
+        tail -n 5 "${RG_LOOKUP_ERROR}"
+        echo ""
+        echo "Acciones posibles:"
+        echo "1. Asignar el rol Contributor al service principal sobre ese"
+        echo "   Resource Group: Azure Portal > Resource Group >"
+        echo "   Access control (IAM) > Add role assignment."
+        echo "2. O cambiar resourceGroupName a un Resource Group donde la"
+        echo "   Service Connection ya tenga permisos."
+
+        rm -f "${RG_LOOKUP_ERROR}"
+
+        exit 1
+
       else
+
+        rm -f "${RG_LOOKUP_ERROR}"
 
         echo "Resource Group no existe."
         echo "Intentando crearlo..."
@@ -555,18 +587,31 @@ steps:
       echo ""
       echo "[1/9] Validando Resource Group..."
 
-      if [ "$(az group exists --name "$(resourceGroupName)")" = "true" ]; then
+      RG_LOOKUP_ERROR="$(Agent.TempDirectory)/rg-lookup-error.log"
 
-        RG_LOCATION=$(az group show \
-          --name "$(resourceGroupName)" \
-          --query location \
-          --output tsv)
+      if RG_LOCATION=$(az group show \
+        --name "$(resourceGroupName)" \
+        --query location \
+        --output tsv 2>"${RG_LOOKUP_ERROR}"); then
+
+        rm -f "${RG_LOOKUP_ERROR}"
 
         echo "OK: Resource Group $(resourceGroupName) ya existe."
         echo "Ubicación del RG: ${RG_LOCATION}"
         echo "Los recursos se crearán explícitamente en ${SELECTED_LOCATION}."
 
+      elif grep -qiE 'forbidden|authorizationfailed|does not have authorization' "${RG_LOOKUP_ERROR}"; then
+
+        echo "ERROR: La Service Connection no tiene acceso a $(resourceGroupName)."
+        tail -n 5 "${RG_LOOKUP_ERROR}"
+
+        rm -f "${RG_LOOKUP_ERROR}"
+
+        exit 1
+
       else
+
+        rm -f "${RG_LOOKUP_ERROR}"
         # Este escenario normalmente ya fue resuelto en el preflight.
         echo "Resource Group no existe. Creando..."
 
@@ -1405,15 +1450,20 @@ steps:
       echo " VALIDACIÓN HTTP LOCAL"
       echo "============================================================"
 
-      HTTP_RESPONSE=$(curl \
-        --fail \
+      HTTP_CODE=$(curl \
         --silent \
         --show-error \
         --max-time 10 \
+        --output /dev/null \
+        --write-out '%{http_code}' \
         http://localhost)
 
-      echo "Respuesta HTTP local:"
-      echo "${HTTP_RESPONSE}"
+      echo "Codigo HTTP local: ${HTTP_CODE}"
+
+      if [ "${HTTP_CODE}" != "200" ]; then
+        echo "ERROR: Apache no respondio 200 en localhost."
+        exit 1
+      fi
 
       echo ""
       echo "============================================================"
@@ -1470,28 +1520,27 @@ steps:
       echo "IP pública: ${PUBLIC_IP}"
       echo "URL: http://${PUBLIC_IP}"
 
+      PUBLISHED_FILE="$(Agent.TempDirectory)/published.html"
+
       SUCCESS=false
-      RESPONSE=""
 
       for ATTEMPT in {1..12}; do
 
         echo ""
         echo "Intento HTTP ${ATTEMPT}/12..."
 
-        if RESPONSE=$(curl \
+        if curl \
           --fail \
           --silent \
           --show-error \
           --max-time 10 \
-          "http://${PUBLIC_IP}"); then
+          --output "${PUBLISHED_FILE}" \
+          "http://${PUBLIC_IP}"; then
 
           echo ""
           echo "============================================================"
           echo " SERVICIO WEB OPERATIVO"
           echo "============================================================"
-
-          echo "Respuesta recibida:"
-          echo "${RESPONSE}"
 
           SUCCESS=true
           break
@@ -1511,31 +1560,38 @@ steps:
         exit 1
       fi
 
-      EXPECTED_CONTENT="$(indexContent)"
+      # El contenido esperado se materializa igual que en la VM, para que la
+      # comparación sea byte a byte incluyendo el salto de línea final.
+      EXPECTED_FILE="$(Agent.TempDirectory)/expected.html"
 
-      if [ "${RESPONSE}" = "${EXPECTED_CONTENT}" ]; then
+      cat > "${EXPECTED_FILE}" <<'EXPECTED_CONTENT'
+      $(indexContent)
+      EXPECTED_CONTENT
+
+      if cmp -s "${EXPECTED_FILE}" "${PUBLISHED_FILE}"; then
 
         echo ""
         echo "============================================================"
         echo " VALIDACIÓN DE CONTENIDO CORRECTA"
         echo "============================================================"
 
-        echo "La página publicada corresponde a indexContent."
+        echo "La página publicada corresponde exactamente a indexContent."
 
       else
 
         echo ""
-        echo "ERROR: El contenido publicado no corresponde al esperado."
-
-        echo "Esperado:"
-        echo "${EXPECTED_CONTENT}"
+        echo "ERROR: El contenido publicado no corresponde a indexContent."
 
         echo ""
-        echo "Obtenido:"
-        echo "${RESPONSE}"
+        echo "Diferencias:"
+        diff "${EXPECTED_FILE}" "${PUBLISHED_FILE}" || true
+
+        rm -f "${EXPECTED_FILE}" "${PUBLISHED_FILE}"
 
         exit 1
       fi
+
+      rm -f "${EXPECTED_FILE}" "${PUBLISHED_FILE}"
 
       echo ""
       echo "============================================================"
