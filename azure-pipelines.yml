@@ -849,6 +849,54 @@ steps:
       else
         echo "NIC no existe. Creando..."
 
+        # Una IP pública Standard solo puede estar asociada a una NIC.
+        # Si queda una NIC residual (p. ej. nic-entrega1 vs nic-entrega-1),
+        # se libera la IP y se elimina esa NIC si no está unida a una VM.
+        PIP_IPCONFIG_ID=$(az network public-ip show \
+          --resource-group "$(resourceGroupName)" \
+          --name "$(publicIpName)" \
+          --query ipConfiguration.id \
+          --output tsv)
+
+        if [ -n "${PIP_IPCONFIG_ID}" ] && [ "${PIP_IPCONFIG_ID}" != "None" ]; then
+          ALLOCATED_NIC_NAME=$(echo "${PIP_IPCONFIG_ID}" | awk -F'/networkInterfaces/' '{print $2}' | awk -F'/' '{print $1}')
+
+          echo "La IP pública $(publicIpName) ya está asignada a: ${ALLOCATED_NIC_NAME}"
+
+          if [ "${ALLOCATED_NIC_NAME}" != "$(networkInterfaceName)" ]; then
+            ALLOCATED_NIC_VM=$(az network nic show \
+              --resource-group "$(resourceGroupName)" \
+              --name "${ALLOCATED_NIC_NAME}" \
+              --query virtualMachine.id \
+              --output tsv)
+
+            if [ -n "${ALLOCATED_NIC_VM}" ] && [ "${ALLOCATED_NIC_VM}" != "None" ]; then
+              echo "ERROR: La IP pública está en uso por otra NIC asociada a una VM."
+              echo "NIC: ${ALLOCATED_NIC_NAME}"
+              echo "VM : $(basename "${ALLOCATED_NIC_VM}")"
+              echo "Alinea networkInterfaceName/vmName con esos recursos o elimínalos."
+              exit 1
+            fi
+
+            echo "La NIC ${ALLOCATED_NIC_NAME} no está asociada a una VM."
+            echo "Liberando IP pública y eliminando NIC residual..."
+
+            az network nic ip-config update \
+              --resource-group "$(resourceGroupName)" \
+              --nic-name "${ALLOCATED_NIC_NAME}" \
+              --name ipconfig1 \
+              --remove publicIpAddress \
+              --output none
+
+            az network nic delete \
+              --resource-group "$(resourceGroupName)" \
+              --name "${ALLOCATED_NIC_NAME}" \
+              --output none
+
+            echo "OK: NIC residual ${ALLOCATED_NIC_NAME} eliminada."
+          fi
+        fi
+
         az network nic create \
           --resource-group "$(resourceGroupName)" \
           --name "$(networkInterfaceName)" \
