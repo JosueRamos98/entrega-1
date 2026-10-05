@@ -1,0 +1,52 @@
+name: entrega2
+
+# Orquestacion de contenedores - Experiencia 2 - DevOps ISY2201
+# Tres aplicaciones ligeras segmentadas, cada una con su propio runtime:
+#   web   -> Nginx 1.27 (Alpine)   : capa de presentacion y proxy inverso
+#   api   -> Python 3.12 + Gunicorn: logica de negocio
+#   cache -> Redis 7 (Alpine)      : almacenamiento en memoria persistente
+# Solo "web" publica un puerto hacia Internet. "api" y "cache" quedan
+# aislados en la red interna red-entrega2, sin exposicion publica.
+
+services:
+  web:
+    build: ./web
+    image: acrentrega2josue.azurecr.io/entrega2-web:1.0
+    container_name: e2-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    networks:
+      - red-entrega2
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    image: acrentrega2josue.azurecr.io/entrega2-api:1.0
+    container_name: e2-api
+    environment:
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+    depends_on:
+      - cache
+    networks:
+      - red-entrega2
+    restart: unless-stopped
+
+  cache:
+    image: redis:7-alpine
+    container_name: e2-cache
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - datos-cache:/data
+    networks:
+      - red-entrega2
+    restart: unless-stopped
+
+networks:
+  red-entrega2:
+    driver: bridge
+
+volumes:
+  datos-cache:
