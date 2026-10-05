@@ -7,11 +7,13 @@ name: entrega2
 #   cache -> Redis 7 (Alpine)      : almacenamiento en memoria persistente
 # Solo "web" publica un puerto hacia Internet. "api" y "cache" quedan
 # aislados en la red interna red-entrega2, sin exposicion publica.
+# La etiqueta de imagen (TAG) la fija el pipeline de CI/CD con el numero
+# de build; por defecto usa 1.0 para ejecucion manual/local.
 
 services:
   web:
     build: ./web
-    image: acrentrega2josue.azurecr.io/entrega2-web:1.0
+    image: acrentrega2josue.azurecr.io/entrega2-web:${TAG:-1.0}
     container_name: e2-web
     ports:
       - "8080:80"
@@ -23,7 +25,7 @@ services:
 
   api:
     build: ./api
-    image: acrentrega2josue.azurecr.io/entrega2-api:1.0
+    image: acrentrega2josue.azurecr.io/entrega2-api:${TAG:-1.0}
     container_name: e2-api
     environment:
       REDIS_HOST: cache
