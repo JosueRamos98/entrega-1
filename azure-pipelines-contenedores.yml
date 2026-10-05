@@ -1,0 +1,101 @@
+# CI/CD - Experiencia 3 - DevOps ISY2201
+# Build y push de las imagenes web/api a Azure Container Registry y
+# despliegue automatizado en vm-entrega-1. El despliegue se hace con
+# "az vm run-command" a traves de la identidad administrada de la VM,
+# sin reabrir el puerto 22 (SSH) que se cerro por seguridad en la
+# Experiencia 2.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [proyecto-contenedores/*]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  acrName: acrentrega2josue
+  resourceGroup: vm-entrega-1_grupo
+  vmName: vm-entrega-1
+  imageTag: $(Build.BuildId)
+
+stages:
+  - stage: Build_y_Push
+    displayName: '1. Build y push de imagenes a ACR'
+    jobs:
+      - job: BuildPush
+        steps:
+          - task: Docker@2
+            displayName: 'Build y push - web'
+            inputs:
+              containerRegistry: 'acr-entrega2-connection'
+              repository: 'entrega2-web'
+              command: 'buildAndPush'
+              Dockerfile: 'proyecto-contenedores/web/Dockerfile'
+              buildContext: 'proyecto-contenedores/web'
+              tags: |
+                $(imageTag)
+                1.0
+
+          - task: Docker@2
+            displayName: 'Build y push - api'
+            inputs:
+              containerRegistry: 'acr-entrega2-connection'
+              repository: 'entrega2-api'
+              command: 'buildAndPush'
+              Dockerfile: 'proyecto-contenedores/api/Dockerfile'
+              buildContext: 'proyecto-contenedores/api'
+              tags: |
+                $(imageTag)
+                1.0
+
+  - stage: Deploy_a_VM
+    displayName: '2. Despliegue automatizado en vm-entrega-1'
+    dependsOn: Build_y_Push
+    jobs:
+      - job: Deploy
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Desplegar contenedores via az vm run-command'
+            inputs:
+              azureSubscription: 'azure-entrega-connection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az vm run-command invoke \
+                  --resource-group $(resourceGroup) \
+                  --name $(vmName) \
+                  --command-id RunShellScript \
+                  --scripts 'export PATH=/opt/azcli-venv/bin:$PATH && az login --identity -o none && az acr login --name $(acrName) -o none && cd /home/azureuser/proyecto-contenedores && TAG=$(imageTag) docker compose pull && TAG=$(imageTag) docker compose up -d'
+
+  - stage: Verificacion
+    displayName: '3. Verificacion post-despliegue'
+    dependsOn: Deploy_a_VM
+    jobs:
+      - job: Verify
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Validar contenedores healthy y app respondiendo'
+            inputs:
+              azureSubscription: 'azure-entrega-connection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                sleep 40
+                RESULT=$(az vm run-command invoke \
+                  --resource-group $(resourceGroup) \
+                  --name $(vmName) \
+                  --command-id RunShellScript \
+                  --scripts 'export PATH=/opt/azcli-venv/bin:$PATH; cd /home/azureuser/proyecto-contenedores; docker compose ps; echo ===HTTP===; curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/' \
+                  --query "value[0].message" -o tsv)
+                echo "$RESULT"
+                if echo "$RESULT" | grep -q "unhealthy"; then
+                  echo "##vso[task.logissue type=error]Al menos un contenedor quedo unhealthy."
+                  exit 1
+                fi
+                if ! echo "$RESULT" | grep -q "200"; then
+                  echo "##vso[task.logissue type=error]La aplicacion no respondio HTTP 200 en el puerto 8080."
+                  exit 1
+                fi
+                echo "Despliegue verificado: contenedores healthy y app respondiendo HTTP 200."
