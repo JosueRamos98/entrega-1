@@ -1,9 +1,9 @@
-# CI/CD - Experiencia 3 - DevOps ISY2201
-# Build y push de las imagenes web/api a Azure Container Registry y
-# despliegue automatizado en vm-entrega-1. El despliegue se hace con
+# CI/CD - Evaluacion Final Transversal - DevOps ISY2201
+# Build unico de las imagenes web/api en Azure Container Registry y promocion
+# de la MISMA version por dos ambientes: QA (verificacion automatica) y
+# PRODUCCION (con aprobacion manual). El despliegue se hace con
 # "az vm run-command" a traves de la identidad administrada de la VM,
-# sin reabrir el puerto 22 (SSH) que se cerro por seguridad en la
-# Experiencia 2.
+# sin reabrir el puerto 22 (SSH).
 
 trigger:
   branches:
@@ -11,8 +11,9 @@ trigger:
   paths:
     include: [proyecto-contenedores/*]
 
+# Version explicita del agente (mayor reproducibilidad que ubuntu-latest)
 pool:
-  vmImage: ubuntu-latest
+  vmImage: ubuntu-24.04
 
 variables:
   acrName: acrentrega2josue
@@ -21,6 +22,9 @@ variables:
   imageTag: $(Build.BuildId)
 
 stages:
+  # ---------------------------------------------------------------------------
+  # 1. CI: construir y publicar las imagenes UNA sola vez (misma version a QA y PROD)
+  # ---------------------------------------------------------------------------
   - stage: Build_y_Push
     displayName: '1. Build y push de imagenes a ACR'
     jobs:
@@ -37,7 +41,6 @@ stages:
               tags: |
                 $(imageTag)
                 1.0
-
           - task: Docker@2
             displayName: 'Build y push - api'
             inputs:
@@ -50,33 +53,43 @@ stages:
                 $(imageTag)
                 1.0
 
-  - stage: Deploy_a_VM
-    displayName: '2. Despliegue automatizado en vm-entrega-1'
+  # ---------------------------------------------------------------------------
+  # 2. CD ambiente QA: segundo conjunto de contenedores en la VM (proyecto
+  #    entrega2-qa, solo accesible desde localhost:8081, sin regla en el NSG)
+  # ---------------------------------------------------------------------------
+  - stage: Deploy_QA
+    displayName: '2. Despliegue en QA'
     dependsOn: Build_y_Push
     jobs:
-      - job: Deploy
-        steps:
-          - task: AzureCLI@2
-            displayName: 'Desplegar contenedores via az vm run-command'
-            inputs:
-              azureSubscription: 'azure-entrega-connection'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                az vm run-command invoke \
-                  --resource-group $(resourceGroup) \
-                  --name $(vmName) \
-                  --command-id RunShellScript \
-                  --scripts 'export PATH=/opt/azcli-venv/bin:$PATH && az login --identity -o none && az acr login --name $(acrName) -o none && cd /home/azureuser/proyecto-contenedores && TAG=$(imageTag) docker compose pull && TAG=$(imageTag) docker compose up -d'
+      - deployment: DeployQA
+        displayName: 'Desplegar version $(imageTag) en QA'
+        environment: qa
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: AzureCLI@2
+                  displayName: 'Desplegar contenedores QA via az vm run-command'
+                  inputs:
+                    azureSubscription: 'azure-entrega-connection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      B64=$(base64 -w0 proyecto-contenedores/docker-compose.qa.yml)
+                      az vm run-command invoke \
+                        --resource-group $(resourceGroup) --name $(vmName) \
+                        --command-id RunShellScript \
+                        --scripts "export PATH=/opt/azcli-venv/bin:\$PATH && az login --identity -o none && az acr login --name $(acrName) -o none && mkdir -p /home/azureuser/qa && echo $B64 | base64 -d > /home/azureuser/qa/docker-compose.yml && cd /home/azureuser/qa && TAG=$(imageTag) docker compose pull && TAG=$(imageTag) docker compose up -d"
 
-  - stage: Verificacion
-    displayName: '3. Verificacion post-despliegue'
-    dependsOn: Deploy_a_VM
+  - stage: Verificacion_QA
+    displayName: '3. Verificacion en QA'
+    dependsOn: Deploy_QA
     jobs:
-      - job: Verify
+      - job: VerifyQA
         steps:
           - task: AzureCLI@2
-            displayName: 'Validar contenedores healthy y app respondiendo'
+            displayName: 'Validar QA: version, contenedores healthy y HTTP 200'
             inputs:
               azureSubscription: 'azure-entrega-connection'
               scriptType: bash
@@ -84,18 +97,86 @@ stages:
               inlineScript: |
                 sleep 40
                 RESULT=$(az vm run-command invoke \
-                  --resource-group $(resourceGroup) \
-                  --name $(vmName) \
+                  --resource-group $(resourceGroup) --name $(vmName) \
+                  --command-id RunShellScript \
+                  --scripts 'export PATH=/opt/azcli-venv/bin:$PATH; cd /home/azureuser/qa; docker compose ps; echo ===HTTP===; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/; echo; echo ===API===; curl -s http://127.0.0.1:8081/api/status' \
+                  --query "value[0].message" -o tsv)
+                echo "$RESULT"
+                if echo "$RESULT" | grep -q "unhealthy"; then
+                  echo "##vso[task.logissue type=error]QA: al menos un contenedor quedo unhealthy."
+                  exit 1
+                fi
+                if ! echo "$RESULT" | grep -q "entrega2-web:$(imageTag)"; then
+                  echo "##vso[task.logissue type=error]QA no esta ejecutando la version $(imageTag)."
+                  exit 1
+                fi
+                if ! echo "$RESULT" | grep -q "200"; then
+                  echo "##vso[task.logissue type=error]QA: la aplicacion no respondio HTTP 200."
+                  exit 1
+                fi
+                if ! echo "$RESULT" | grep -Eq 'cache_disponible": ?true'; then
+                  echo "##vso[task.logissue type=error]QA: la API no alcanza Redis."
+                  exit 1
+                fi
+                echo "QA validado: version $(imageTag) healthy, HTTP 200 y Redis alcanzable."
+
+  # ---------------------------------------------------------------------------
+  # 4. CD ambiente PROD: la MISMA version ya validada en QA, tras aprobacion manual
+  #    (el entorno 'produccion' tiene un check de aprobacion en Azure DevOps)
+  # ---------------------------------------------------------------------------
+  - stage: Deploy_PROD
+    displayName: '4. Despliegue en PRODUCCION (con aprobacion)'
+    dependsOn: Verificacion_QA
+    jobs:
+      - deployment: DeployPROD
+        displayName: 'Promover version $(imageTag) a PRODUCCION'
+        environment: produccion
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Desplegar contenedores PROD via az vm run-command'
+                  inputs:
+                    azureSubscription: 'azure-entrega-connection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az vm run-command invoke \
+                        --resource-group $(resourceGroup) --name $(vmName) \
+                        --command-id RunShellScript \
+                        --scripts 'export PATH=/opt/azcli-venv/bin:$PATH && az login --identity -o none && az acr login --name $(acrName) -o none && cd /home/azureuser/proyecto-contenedores && TAG=$(imageTag) docker compose pull && TAG=$(imageTag) docker compose up -d'
+
+  - stage: Verificacion_PROD
+    displayName: '5. Verificacion en PRODUCCION'
+    dependsOn: Deploy_PROD
+    jobs:
+      - job: VerifyPROD
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Validar PROD: version, contenedores healthy y HTTP 200'
+            inputs:
+              azureSubscription: 'azure-entrega-connection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                sleep 40
+                RESULT=$(az vm run-command invoke \
+                  --resource-group $(resourceGroup) --name $(vmName) \
                   --command-id RunShellScript \
                   --scripts 'export PATH=/opt/azcli-venv/bin:$PATH; cd /home/azureuser/proyecto-contenedores; docker compose ps; echo ===HTTP===; curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/' \
                   --query "value[0].message" -o tsv)
                 echo "$RESULT"
                 if echo "$RESULT" | grep -q "unhealthy"; then
-                  echo "##vso[task.logissue type=error]Al menos un contenedor quedo unhealthy."
+                  echo "##vso[task.logissue type=error]PROD: al menos un contenedor quedo unhealthy."
+                  exit 1
+                fi
+                if ! echo "$RESULT" | grep -q "entrega2-web:$(imageTag)"; then
+                  echo "##vso[task.logissue type=error]PROD no esta ejecutando la version $(imageTag)."
                   exit 1
                 fi
                 if ! echo "$RESULT" | grep -q "200"; then
-                  echo "##vso[task.logissue type=error]La aplicacion no respondio HTTP 200 en el puerto 8080."
+                  echo "##vso[task.logissue type=error]PROD: la aplicacion no respondio HTTP 200."
                   exit 1
                 fi
-                echo "Despliegue verificado: contenedores healthy y app respondiendo HTTP 200."
+                echo "Produccion verificada: version $(imageTag) healthy y respondiendo HTTP 200."
