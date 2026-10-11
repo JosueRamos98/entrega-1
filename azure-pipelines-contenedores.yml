@@ -99,7 +99,7 @@ stages:
                 RESULT=$(az vm run-command invoke \
                   --resource-group $(resourceGroup) --name $(vmName) \
                   --command-id RunShellScript \
-                  --scripts 'export PATH=/opt/azcli-venv/bin:$PATH; cd /home/azureuser/qa; docker compose ps; echo ===HTTP===; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/; echo; echo ===API===; curl -s http://127.0.0.1:8081/api/status' \
+                  --scripts 'export PATH=/opt/azcli-venv/bin:$PATH; cd /home/azureuser/qa; TAG=$(imageTag) docker compose ps; echo ===HTTP===; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/; echo; echo ===API===; curl -s http://127.0.0.1:8081/api/status' \
                   --query "value[0].message" -o tsv)
                 echo "$RESULT"
                 if echo "$RESULT" | grep -q "unhealthy"; then
