@@ -1,0 +1,47 @@
+name: entrega2-qa
+
+# Ambiente QA - mismo codigo e imagenes que PRODUCCION (docker-compose.yml),
+# pero con proyecto, red, volumen y contenedores propios para no mezclarse con PROD.
+# El puerto 8081 se publica SOLO en 127.0.0.1 de la VM: el pipeline lo prueba por
+# dentro y no se abre ninguna regla adicional en el NSG.
+
+services:
+  web:
+    image: acrentrega2josue.azurecr.io/entrega2-web:${TAG:?definir TAG}
+    container_name: qa-web
+    ports:
+      - "127.0.0.1:8081:80"
+    depends_on:
+      - api
+    networks:
+      - red-qa
+    restart: unless-stopped
+
+  api:
+    image: acrentrega2josue.azurecr.io/entrega2-api:${TAG:?definir TAG}
+    container_name: qa-api
+    environment:
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+    depends_on:
+      - cache
+    networks:
+      - red-qa
+    restart: unless-stopped
+
+  cache:
+    image: redis:7-alpine
+    container_name: qa-cache
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - datos-cache-qa:/data
+    networks:
+      - red-qa
+    restart: unless-stopped
+
+networks:
+  red-qa:
+    driver: bridge
+
+volumes:
+  datos-cache-qa:
